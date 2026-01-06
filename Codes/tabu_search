@@ -1,0 +1,179 @@
+"""
+Tabu Search for scheduling optimization
+"""
+from typing import List, Tuple, Dict
+import numpy as np
+from modules.scheduling_core import Job, Schedule, SchedulingUtils
+from modules.dispatching_rules import DispatchingRules
+
+
+class TabuSearch:
+    """Tabu Search algorithm with configurable options"""
+    
+    def __init__(self, jobs: List[Job], schedule: Schedule, objective: str, params: dict):
+        self.jobs = jobs
+        self.schedule = schedule
+        self.objective = objective
+        self.problem_type = schedule.problem_type
+        
+        self.tabu_list_size = params.get('tabu_list_size', 10)
+        self.max_iterations = params.get('max_iterations', 200)
+        
+        # New options
+        self.neighborhood_type = params.get('neighborhood_type', 'swap')  # 'swap', 'insert', 'adjacent'
+        self.search_strategy = params.get('search_strategy', 'best')  # 'first_improving', 'best_improving'
+        self.max_no_improve = params.get('max_no_improve', 50)  # Termination criteria
+        
+        self.tabu_list = []
+        self.current_solution = None
+        self.current_fitness = float('inf')
+        self.best_solution = None
+        self.best_fitness = float('inf')
+        self.convergence = []
+        
+        # Check if any job has predecessors
+        self.has_precedence = any(len(job.predecessors) > 0 for job in jobs)
+    
+    def solve(self) -> Dict:
+        """Run tabu search"""
+        n = len(self.jobs)
+        
+        # Initialize with valid order (topological if precedence exists)
+        if self.has_precedence:
+            self.current_solution = SchedulingUtils.topological_sort_indices(self.jobs)
+        else:
+            self.current_solution = np.random.permutation(n).tolist()
+        
+        self.current_fitness = self._evaluate(self.current_solution)
+        self.best_solution = self.current_solution.copy()
+        self.best_fitness = self.current_fitness
+        
+        no_improve_count = 0
+        
+        for iteration in range(self.max_iterations):
+            if no_improve_count >= self.max_no_improve:
+                break
+            
+            neighbors = self._generate_neighbors(self.current_solution)
+            
+            best_neighbor = None
+            best_neighbor_fitness = float('inf')
+            best_move = None
+            
+            for neighbor, move in neighbors:
+                # Repair for precedence if needed
+                if self.has_precedence:
+                    neighbor = SchedulingUtils.repair_precedence(neighbor, self.jobs)
+                
+                fitness = self._evaluate(neighbor)
+                
+                is_tabu = self._is_tabu_move(move)
+                aspiration_criterion = fitness < self.best_fitness
+                
+                if (not is_tabu or aspiration_criterion) and fitness < best_neighbor_fitness:
+                    best_neighbor = neighbor
+                    best_neighbor_fitness = fitness
+                    best_move = move
+                    
+                    # First-improving: accept first non-tabu improving move
+                    if self.search_strategy == 'first_improving' and fitness < self.current_fitness:
+                        break
+            
+            if best_neighbor is not None:
+                self.current_solution = best_neighbor
+                self.current_fitness = best_neighbor_fitness
+                
+                self._add_to_tabu_list(best_move)
+                
+                if self.current_fitness < self.best_fitness:
+                    self.best_solution = self.current_solution.copy()
+                    self.best_fitness = self.current_fitness
+                    no_improve_count = 0
+                else:
+                    no_improve_count += 1
+            else:
+                no_improve_count += 1
+            
+            self.convergence.append(self.best_fitness)
+        
+        final_schedule = self.schedule.clone()
+        final_schedule.reset()
+        ordered_jobs = [final_schedule.jobs[i] for i in self.best_solution]
+        DispatchingRules._build_schedule(ordered_jobs, final_schedule)
+        
+        return {
+            'schedule': final_schedule,
+            'fitness': self.best_fitness,
+            'convergence': self.convergence
+        }
+    
+    def _evaluate(self, solution: List[int]) -> float:
+        """Evaluate solution fitness"""
+        schedule_clone = self.schedule.clone()
+        schedule_clone.reset()
+        
+        ordered_jobs = [schedule_clone.jobs[i] for i in solution]
+        DispatchingRules._build_schedule(ordered_jobs, schedule_clone)
+        
+        return schedule_clone.get_objective_value(self.objective)
+    
+    def _generate_neighbors(self, solution: List[int]) -> List[Tuple[List[int], Tuple]]:
+        """Generate neighbors based on selected neighborhood type.
+        Moves are recorded using JOB IDs (not positions) for stability after repair."""
+        neighbors = []
+        n = len(solution)
+        
+        if self.neighborhood_type == 'insert':
+            # Insert neighborhood: remove job and insert elsewhere
+            for i in range(n):
+                for j in range(n):
+                    if i != j:
+                        neighbor = solution.copy()
+                        job_id = solution[i]  # Track by job ID
+                        neighbor.pop(i)
+                        neighbor.insert(j, job_id)
+                        neighbors.append((neighbor, ('insert', job_id, j)))
+        
+        elif self.neighborhood_type == 'adjacent':
+            # Adjacent swap neighborhood
+            for i in range(n - 1):
+                neighbor = solution.copy()
+                job_a, job_b = solution[i], solution[i + 1]  # Track by job IDs
+                neighbor[i], neighbor[i + 1] = neighbor[i + 1], neighbor[i]
+                neighbors.append((neighbor, ('swap', job_a, job_b)))
+        
+        else:  # default 'swap'
+            # All pairs swap
+            for i in range(n - 1):
+                for j in range(i + 1, n):
+                    neighbor = solution.copy()
+                    job_a, job_b = solution[i], solution[j]  # Track by job IDs
+                    neighbor[i], neighbor[j] = neighbor[j], neighbor[i]
+                    neighbors.append((neighbor, ('swap', job_a, job_b)))
+        
+        return neighbors
+    
+    def _is_tabu_move(self, move: Tuple) -> bool:
+        """Check if move is in tabu list. Moves are compared by job IDs."""
+        move_type = move[0]
+        
+        if move_type == 'swap':
+            job_a, job_b = move[1], move[2]
+            return any(
+                m[0] == 'swap' and 
+                ((m[1] == job_a and m[2] == job_b) or (m[1] == job_b and m[2] == job_a))
+                for m in self.tabu_list
+            )
+        elif move_type == 'insert':
+            job_id, target_pos = move[1], move[2]
+            return any(
+                m[0] == 'insert' and m[1] == job_id
+                for m in self.tabu_list
+            )
+        return False
+    
+    def _add_to_tabu_list(self, move: Tuple):
+        """Add move to tabu list"""
+        self.tabu_list.append(move)
+        if len(self.tabu_list) > self.tabu_list_size:
+            self.tabu_list.pop(0)
