@@ -1,0 +1,299 @@
+"""
+Dispatching rules for scheduling problems
+"""
+from typing import List
+from modules.scheduling_core import Job, Machine, Schedule
+
+
+class DispatchingRules:
+    """Collection of dispatching rule algorithms"""
+    
+    @staticmethod
+    def SPT(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Shortest Processing Time"""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: j.get_total_processing_time())
+        return DispatchingRules._build_schedule(sorted_jobs, schedule)
+    
+    @staticmethod
+    def LPT(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Longest Processing Time"""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: j.get_total_processing_time(), reverse=True)
+        return DispatchingRules._build_schedule(sorted_jobs, schedule)
+    
+    @staticmethod
+    def EDD(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Earliest Due Date"""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: j.due_date if j.due_date is not None else float('inf'))
+        return DispatchingRules._build_schedule(sorted_jobs, schedule)
+    
+    @staticmethod
+    def WSPT(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Weighted Shortest Processing Time"""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: j.weight / j.get_total_processing_time(), reverse=True)
+        return DispatchingRules._build_schedule(sorted_jobs, schedule)
+    
+    @staticmethod
+    def FIFO(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """First In First Out (by release date)"""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: (j.release_date, j.id))
+        return DispatchingRules._build_schedule(sorted_jobs, schedule)
+    
+    @staticmethod
+    def ERD(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Earliest Release Date - orders jobs by when they become available"""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: (j.release_date, j.id))
+        return DispatchingRules._build_schedule(sorted_jobs, schedule)
+    
+    @staticmethod
+    def WrapAround(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Wrap-Around Rule - Sequential round-robin assignment to parallel machines"""
+        schedule.reset()
+        # Process jobs in their original order
+        sorted_jobs = sorted(jobs, key=lambda j: j.id)
+        return DispatchingRules._build_wrap_around(sorted_jobs, schedule)
+    
+    @staticmethod
+    def Johnson(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Johnson's Rule for 2-machine flow shop (F2||Cmax)
+        Minimizes makespan by optimal sequencing"""
+        schedule.reset()
+        
+        if schedule.num_machines != 2 or schedule.problem_type != 'F':
+            # Fall back to SPT for non-F2 problems
+            sorted_jobs = sorted(jobs, key=lambda j: j.get_total_processing_time())
+            return DispatchingRules._build_schedule(sorted_jobs, schedule)
+        
+        # Johnson's algorithm
+        set_u = []  # Jobs where p1 < p2 (front of sequence)
+        set_v = []  # Jobs where p1 >= p2 (back of sequence)
+        
+        for job in jobs:
+            p1 = job.get_processing_time(0)
+            p2 = job.get_processing_time(1)
+            if p1 < p2:
+                set_u.append(job)
+            else:
+                set_v.append(job)
+        
+        # Sort U by p1 ascending, V by p2 descending
+        set_u.sort(key=lambda j: j.get_processing_time(0))
+        set_v.sort(key=lambda j: j.get_processing_time(1), reverse=True)
+        
+        sorted_jobs = set_u + set_v
+        return DispatchingRules._build_flow_shop(sorted_jobs, schedule)
+    
+    @staticmethod
+    def _build_schedule(sorted_jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Build schedule based on job ordering and problem type.
+        When precedence constraints exist, reorder using topological sort while
+        respecting the dispatching rule priority as a tiebreaker."""
+        
+        # Check if any job has precedence constraints
+        has_precedence = any(len(job.predecessors) > 0 for job in sorted_jobs)
+        
+        if has_precedence:
+            # Reorder using topological sort with dispatching priority as tiebreaker
+            sorted_jobs = DispatchingRules._topological_reorder(sorted_jobs)
+        
+        schedule.set_job_sequence([j.id for j in sorted_jobs])
+        
+        if schedule.problem_type == '1':
+            return DispatchingRules._build_single_machine(sorted_jobs, schedule)
+        elif schedule.problem_type == 'P':
+            return DispatchingRules._build_parallel_machines(sorted_jobs, schedule)
+        elif schedule.problem_type == 'F':
+            return DispatchingRules._build_flow_shop(sorted_jobs, schedule)
+        else:
+            return DispatchingRules._build_single_machine(sorted_jobs, schedule)
+    
+    @staticmethod
+    def _topological_reorder(jobs: List[Job]) -> List[Job]:
+        """Reorder jobs to respect precedence while keeping dispatching priority as tiebreaker.
+        Jobs earlier in the input list have higher priority."""
+        job_map = {job.id: job for job in jobs}
+        priority = {job.id: i for i, job in enumerate(jobs)}  # Lower = higher priority
+        
+        # Build in-degree count
+        in_degree = {job.id: 0 for job in jobs}
+        for job in jobs:
+            for pred_id in job.predecessors:
+                if pred_id in job_map:
+                    in_degree[job.id] += 1
+        
+        # Build successor list
+        successors = {job.id: [] for job in jobs}
+        for job in jobs:
+            for pred_id in job.predecessors:
+                if pred_id in successors:
+                    successors[pred_id].append(job.id)
+        
+        # Kahn's algorithm with priority queue
+        ready = [job.id for job in jobs if in_degree[job.id] == 0]
+        ready.sort(key=lambda jid: priority[jid])  # Sort by dispatching priority
+        
+        result = []
+        while ready:
+            current = ready.pop(0)
+            result.append(job_map[current])
+            
+            # Add successors that are now ready
+            new_ready = []
+            for succ in successors[current]:
+                in_degree[succ] -= 1
+                if in_degree[succ] == 0:
+                    new_ready.append(succ)
+            
+            # Sort new ready jobs by priority and merge into ready list
+            new_ready.sort(key=lambda jid: priority[jid])
+            # Insert maintaining priority order
+            for jid in new_ready:
+                inserted = False
+                for i, rid in enumerate(ready):
+                    if priority[jid] < priority[rid]:
+                        ready.insert(i, jid)
+                        inserted = True
+                        break
+                if not inserted:
+                    ready.append(jid)
+        
+        return result
+    
+    @staticmethod
+    def _build_single_machine(sorted_jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Single machine scheduling with precedence constraints"""
+        machine = schedule.machines[0]
+        current_time = 0.0
+        
+        # Build job lookup for predecessor completion times
+        job_map = {job.id: job for job in sorted_jobs}
+        
+        for job in sorted_jobs:
+            # Start time must respect: machine available, release date, and predecessor completion
+            earliest_start = max(current_time, job.release_date)
+            
+            # Check predecessor completion times
+            for pred_id in job.predecessors:
+                if pred_id in job_map:
+                    pred_job = job_map[pred_id]
+                    earliest_start = max(earliest_start, pred_job.completion_time)
+            
+            job.start_time = earliest_start
+            current_time = machine.add_job(job, earliest_start)
+            job.completion_time = current_time
+        
+        schedule.calculate_metrics()
+        return schedule
+    
+    @staticmethod
+    def _build_parallel_machines(sorted_jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Parallel machines scheduling with precedence constraints.
+        For machines with different processing times, selects machine minimizing completion."""
+        # Build job lookup for predecessor completion times
+        job_map = {job.id: job for job in sorted_jobs}
+        
+        for job in sorted_jobs:
+            # Calculate earliest start considering release and predecessors
+            earliest_start = job.release_date
+            for pred_id in job.predecessors:
+                if pred_id in job_map:
+                    pred_job = job_map[pred_id]
+                    earliest_start = max(earliest_start, pred_job.completion_time)
+            
+            # Find machine that minimizes completion time
+            best_machine = None
+            best_completion = float('inf')
+            best_start = 0.0
+            
+            for machine in schedule.machines:
+                start = max(machine.available_time, earliest_start)
+                p_jm = job.get_processing_time(machine.id)
+                completion = start + p_jm
+                if completion < best_completion:
+                    best_completion = completion
+                    best_machine = machine
+                    best_start = start
+            
+            job.start_time = best_start
+            best_machine.add_job(job, best_start)
+            job.completion_time = best_completion
+        
+        schedule.calculate_metrics()
+        return schedule
+    
+    @staticmethod
+    def _build_wrap_around(sorted_jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Wrap-around (round-robin) assignment for parallel machines.
+        Assigns job i to machine (i mod m)."""
+        num_machines = schedule.num_machines
+        
+        # Build job lookup for predecessor completion times
+        job_map = {job.id: job for job in sorted_jobs}
+        
+        for idx, job in enumerate(sorted_jobs):
+            # Assign to machine in round-robin fashion
+            machine_id = idx % num_machines
+            machine = schedule.machines[machine_id]
+            
+            # Start time must respect machine, release date, and predecessors
+            start_time = max(machine.available_time, job.release_date)
+            
+            # Check predecessor completion times
+            for pred_id in job.predecessors:
+                if pred_id in job_map:
+                    pred_job = job_map[pred_id]
+                    start_time = max(start_time, pred_job.completion_time)
+            
+            job.start_time = start_time
+            end_time = machine.add_job(job, start_time)
+            job.completion_time = end_time
+        
+        schedule.calculate_metrics()
+        return schedule
+    
+    @staticmethod
+    def _build_flow_shop(sorted_jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Flow shop scheduling (permutation flow shop) with precedence support.
+        Precedence: job can't start on M1 until predecessor completes on last machine."""
+        num_machines = schedule.num_machines
+        
+        # Build job lookup for predecessor completion times
+        job_map = {job.id: job for job in sorted_jobs}
+        
+        for job in sorted_jobs:
+            start_time = 0.0
+            
+            # On first machine: respect release date AND predecessor completion
+            machine0 = schedule.machines[0]
+            start_time = max(machine0.available_time, job.release_date)
+            
+            # Precedence: wait for predecessors to complete on LAST machine
+            for pred_id in job.predecessors:
+                if pred_id in job_map:
+                    pred_job = job_map[pred_id]
+                    # Predecessor must be fully done (completed on last machine)
+                    start_time = max(start_time, pred_job.completion_time)
+            
+            job.start_time = start_time
+            
+            # Process through all machines
+            for m in range(num_machines):
+                machine = schedule.machines[m]
+                # Job can start when both machine is free and previous operation is done
+                start_time = max(machine.available_time, start_time)
+                
+                processing_time = job.get_processing_time(m)
+                end_time = start_time + processing_time
+                
+                machine.add_job(job, start_time)
+                start_time = end_time
+            
+            job.completion_time = start_time
+        
+        schedule.calculate_metrics()
+        return schedule
