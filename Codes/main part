@@ -1,0 +1,549 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import time
+from modules.scheduling_core import Job, Schedule
+from modules.dispatching_rules import DispatchingRules
+from modules.tabu_search import TabuSearch
+from modules.simulated_annealing import SimulatedAnnealing
+
+from modules.visualization import create_gantt_chart, create_convergence_chart, create_comparison_chart
+
+# Page configuration
+st.set_page_config(
+    page_title="Scheduling DSS",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main {background-color: #0e1117;}
+    .stButton>button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem 2rem;
+        font-weight: 600;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    h1 {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Header
+st.title("📊 Scheduling Decision Support System")
+st.markdown("*Production scheduling with optimization algorithms*")
+st.divider()
+
+# Sidebar - Problem Definition
+with st.sidebar:
+    st.header("🔧 Problem Definition")
+    
+    # Alpha - Machine Environment (only 1, P, F)
+    alpha = st.selectbox(
+        "α - Machine Environment",
+        options=['', '1', 'P', 'F'],
+        format_func=lambda x: {
+            '': 'Select...',
+            '1': '1 - Single Machine',
+            'P': 'P - Parallel Machines',
+            'F': 'F - Flow Shop'
+        }[x]
+    )
+    
+    # Beta - Constraints (MULTISELECT)
+    beta = st.multiselect(
+        "β - Constraints (can select multiple)",
+        options=['prec', 'ri', 'di'],
+        format_func=lambda x: {
+            'prec': 'prec - Precedence',
+            'ri': 'ri - Release Dates',
+            'di': 'di - Deadlines'
+        }[x],
+        help="Select one or more constraints"
+    )
+    
+    # Gamma - Objective (added sumwiTi)
+    gamma = st.selectbox(
+        "γ - Objective Function",
+        options=['', 'Cmax', 'sumCi', 'sumwiCi', 'Lmax', 'sumTi', 'sumwiTi'],
+        format_func=lambda x: {
+            '': 'Select...',
+            'Cmax': 'Cmax - Makespan',
+            'sumCi': 'ΣCi - Total Completion Time',
+            'sumwiCi': 'ΣwiCi - Weighted Completion',
+            'Lmax': 'Lmax - Maximum Lateness',
+            'sumTi': 'ΣTi - Total Tardiness',
+            'sumwiTi': 'ΣwiTi - Weighted Tardiness'
+        }[x]
+    )
+    
+    # Display problem notation
+    if alpha and gamma:
+        beta_str = ','.join(beta) if beta else ''
+        st.success(f"**Problem:** `{alpha}|{beta_str}|{gamma}`")
+
+# Main area
+if alpha and gamma:
+    st.header("⚙️ Job Configuration")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        num_jobs = st.number_input("Number of Jobs", min_value=1, max_value=50, value=5)
+    
+    with col2:
+        if alpha in ['P', 'F']:
+            num_machines = st.number_input("Number of Machines", min_value=1, max_value=20, value=3)
+        else:
+            num_machines = 1
+            st.info("Single machine problem")
+    
+    # Generate job table
+    if st.button("🔄 Generate/Reset Job Table"):
+        # Initialize session state for job data
+        st.session_state.job_data = {}
+        st.session_state.constraints_data = {}
+        
+        # Processing times
+        if alpha == '1':
+            # Single machine: one processing time per job
+            st.session_state.job_data['Processing Time'] = np.random.randint(5, 25, num_jobs).tolist()
+        elif alpha == 'P':
+            # Parallel machines: one processing time per job (identical machines)
+            st.session_state.job_data['Processing Time'] = np.random.randint(5, 25, num_jobs).tolist()
+        else:
+            # Flow Shop: need processing time for each machine
+            for m in range(num_machines):
+                st.session_state.job_data[f'M{m+1}'] = np.random.randint(5, 25, num_jobs).tolist()
+        
+        # Weights (for weighted objectives)
+        if gamma in ['sumwiCi', 'sumwiTi']:
+            st.session_state.job_data['Weight'] = np.random.randint(1, 10, num_jobs).tolist()
+        
+        # Store constraint settings
+        st.session_state.has_release_dates = 'ri' in beta
+        st.session_state.has_due_dates = 'di' in beta or gamma in ['Lmax', 'sumTi', 'sumwiTi']
+        st.session_state.has_precedence = 'prec' in beta
+        
+        # Initialize release dates if constraint selected
+        if st.session_state.has_release_dates:
+            st.session_state.constraints_data['Release Date'] = np.random.randint(0, 20, num_jobs).tolist()
+        
+        # Initialize due dates if constraint selected or needed for objective
+        if st.session_state.has_due_dates:
+            st.session_state.constraints_data['Due Date'] = np.random.randint(50, 150, num_jobs).tolist()
+        
+        # Initialize precedence (empty by default)
+        if st.session_state.has_precedence:
+            st.session_state.constraints_data['Predecessors'] = [''] * num_jobs
+    
+    # Display and edit job table
+    if 'job_data' in st.session_state:
+        st.subheader("📋 Processing Times")
+        
+        df = pd.DataFrame(st.session_state.job_data)
+        df.index = [f'Job {i+1}' for i in range(num_jobs)]
+        
+        # Editable dataframe for processing times
+        edited_df = st.data_editor(
+            df,
+            use_container_width=True,
+            num_rows="fixed",
+            key="processing_times_editor"
+        )
+        
+        # Release Dates Section
+        if st.session_state.get('has_release_dates', False):
+            st.subheader("📅 Release Dates (ri constraint)")
+            st.caption("When each job becomes available for processing")
+            
+            release_df = pd.DataFrame({
+                'Release Date': st.session_state.constraints_data.get('Release Date', [0] * num_jobs)
+            })
+            release_df.index = [f'Job {i+1}' for i in range(num_jobs)]
+            
+            edited_release = st.data_editor(
+                release_df,
+                use_container_width=True,
+                num_rows="fixed",
+                key="release_dates_editor"
+            )
+            st.session_state.constraints_data['Release Date'] = edited_release['Release Date'].tolist()
+        
+        # Due Dates Section  
+        if st.session_state.get('has_due_dates', False):
+            st.subheader("⏰ Due Dates (di constraint)")
+            st.caption("Target completion times for calculating lateness/tardiness")
+            
+            due_df = pd.DataFrame({
+                'Due Date': st.session_state.constraints_data.get('Due Date', [100] * num_jobs)
+            })
+            due_df.index = [f'Job {i+1}' for i in range(num_jobs)]
+            
+            edited_due = st.data_editor(
+                due_df,
+                use_container_width=True,
+                num_rows="fixed",
+                key="due_dates_editor"
+            )
+            st.session_state.constraints_data['Due Date'] = edited_due['Due Date'].tolist()
+        
+        # Precedence Constraints Section
+        if st.session_state.get('has_precedence', False):
+            st.subheader("🔗 Precedence Constraints (prec)")
+            st.caption("Enter predecessor job numbers (comma-separated). Example: '1,3' means job must wait for Jobs 1 and 3")
+            
+            prec_df = pd.DataFrame({
+                'Predecessors': st.session_state.constraints_data.get('Predecessors', [''] * num_jobs)
+            })
+            prec_df.index = [f'Job {i+1}' for i in range(num_jobs)]
+            
+            edited_prec = st.data_editor(
+                prec_df,
+                use_container_width=True,
+                num_rows="fixed",
+                key="precedence_editor"
+            )
+            st.session_state.constraints_data['Predecessors'] = edited_prec['Predecessors'].tolist()
+        
+        st.divider()
+        
+        # Solver Selection
+        st.header("🧮 Solver Selection")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Dispatching Rules")
+            use_spt = st.checkbox("SPT", help="Shortest Processing Time")
+            use_lpt = st.checkbox("LPT", help="Longest Processing Time")
+            use_edd = st.checkbox("EDD", help="Earliest Due Date")
+            use_wspt = st.checkbox("WSPT", help="Weighted SPT")
+            use_fifo = st.checkbox("FIFO", help="First In First Out")
+            use_erd = st.checkbox("ERD", help="Earliest Release Date")
+            
+            # Show special rules based on environment
+            if alpha == 'P':
+                use_wraparound = st.checkbox("Wrap-Around", help="Round-robin assignment")
+            else:
+                use_wraparound = False
+            
+            if alpha == 'F' and num_machines == 2:
+                use_johnson = st.checkbox("Johnson's Rule", help="Optimal for 2-machine flow shop")
+            else:
+                use_johnson = False
+        
+        with col2:
+            st.subheader("Metaheuristics")
+            use_sa = st.checkbox("Simulated Annealing")
+            use_ts = st.checkbox("Tabu Search")
+        
+        # Algorithm Parameters - set defaults first
+        neighborhood_type = 'swap'
+        max_no_improve = 200
+        search_strategy = 'best'
+        sa_temp = 1000
+        sa_cool = 0.95
+        sa_iter = 100
+        sa_min = 1.0
+        ts_tabu = 10
+        ts_iter = 200
+        
+        if any([use_sa, use_ts]):
+            st.divider()
+            st.header("🎛️ Algorithm Parameters")
+            
+            # Common options for both
+            st.subheader("Neighborhood & Strategy Options")
+            col1, col2 = st.columns(2)
+            with col1:
+                neighborhood_type = st.selectbox(
+                    "Neighborhood Type",
+                    options=['swap', 'insert', 'adjacent'],
+                    format_func=lambda x: {
+                        'swap': 'Swap - Exchange any two jobs',
+                        'insert': 'Insert - Remove and reinsert job',
+                        'adjacent': 'Adjacent - Swap neighboring jobs'
+                    }[x]
+                )
+            with col2:
+                max_no_improve = st.number_input("Max Iterations Without Improvement", 10, 500, 50)
+            
+            if use_sa:
+                with st.expander("Simulated Annealing Parameters", expanded=False):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        sa_temp = st.number_input("Initial Temperature", 100, 10000, 1000, key="sa_temp")
+                        sa_cool = st.slider("Cooling Rate", 0.8, 0.99, 0.95, key="sa_cool")
+                    with col2:
+                        sa_iter = st.number_input("Iterations per Temp", 10, 500, 100, key="sa_iter")
+                        sa_min = st.number_input("Min Temperature", 0.1, 10.0, 1.0, key="sa_min")
+            
+            if use_ts:
+                with st.expander("Tabu Search Parameters", expanded=False):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        ts_tabu = st.number_input("Tabu List Size", 5, 50, 10, key="ts_tabu")
+                        search_strategy = st.selectbox(
+                            "Search Strategy",
+                            options=['best', 'first_improving'],
+                            format_func=lambda x: {
+                                'best': 'Best Improving - Evaluate all neighbors',
+                                'first_improving': 'First Improving - Accept first improvement'
+                            }[x]
+                        )
+                    with col2:
+                        ts_iter = st.number_input("Max Iterations", 50, 10000, 200, key="ts_iter")
+        
+        st.divider()
+        
+        # Solve button
+        if st.button("🚀 Solve Problem", type="primary", use_container_width=True):
+            
+            # Check if at least one solver is selected
+            selected_solvers = [use_spt, use_lpt, use_edd, use_wspt, use_fifo, use_erd,
+                              use_wraparound, use_johnson, use_sa, use_ts]
+            
+            if not any(selected_solvers):
+                st.error("Please select at least one solver!")
+            else:
+                # Create jobs from dataframe
+                jobs = []
+                
+                # Get constraint data
+                constraints = st.session_state.get('constraints_data', {})
+                
+                # Validate dataframe columns match problem type
+                try:
+                    for i in range(num_jobs):
+                        # Single machine and Parallel machines use ONE processing time
+                        if alpha in ['1', 'P']:
+                            p_times = edited_df.iloc[i]['Processing Time']
+                        else:
+                            # Flow Shop use list of processing times
+                            p_times = [edited_df.iloc[i][f'M{m+1}'] for m in range(num_machines)]
+                        
+                        # Get weight from processing times editor
+                        weight = edited_df.iloc[i].get('Weight', 1.0)
+                        
+                        # Get release date from constraints data
+                        release_dates = constraints.get('Release Date', [])
+                        release_date = release_dates[i] if i < len(release_dates) else 0.0
+                        
+                        # Get due date from constraints data
+                        due_dates = constraints.get('Due Date', [])
+                        due_date = due_dates[i] if i < len(due_dates) else None
+                        
+                        # Parse predecessors from constraints data
+                        predecessors = []
+                        prec_strs = constraints.get('Predecessors', [])
+                        if i < len(prec_strs) and prec_strs[i]:
+                            try:
+                                # Parse comma-separated job numbers (1-indexed from UI)
+                                for p in str(prec_strs[i]).split(','):
+                                    p = p.strip()
+                                    if p:
+                                        pred_id = int(p) - 1  # Convert to 0-indexed
+                                        if 0 <= pred_id < num_jobs and pred_id != i:
+                                            predecessors.append(pred_id)
+                            except ValueError:
+                                pass  # Ignore invalid input
+                        
+                        job = Job(i, p_times, due_date, weight, release_date)
+                        job.predecessors = predecessors
+                        jobs.append(job)
+                except KeyError as e:
+                    st.error(f"⚠️ Column mismatch! Please click 'Generate/Reset Job Table' to create a new table for the selected problem type. Missing column: {e}")
+                    st.stop()
+                
+                # Create schedule
+                schedule = Schedule(jobs, alpha, num_machines)
+                
+                # Run solvers
+                results = []
+                lower_bound = None
+                convergence_data = {}
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                solver_list = []
+                if use_spt: solver_list.append(('SPT', DispatchingRules.SPT))
+                if use_lpt: solver_list.append(('LPT', DispatchingRules.LPT))
+                if use_edd: solver_list.append(('EDD', DispatchingRules.EDD))
+                if use_wspt: solver_list.append(('WSPT', DispatchingRules.WSPT))
+                if use_fifo: solver_list.append(('FIFO', DispatchingRules.FIFO))
+                if use_erd: solver_list.append(('ERD', DispatchingRules.ERD))
+                if use_wraparound: solver_list.append(('Wrap-Around', DispatchingRules.WrapAround))
+                if use_johnson: solver_list.append(("Johnson's Rule", DispatchingRules.Johnson))
+                
+                total_solvers = len(solver_list) + sum([use_sa, use_ts])
+                current = 0
+                
+                # Dispatching rules
+                for name, rule_func in solver_list:
+                    status_text.text(f"Running {name}...")
+                    start_time = time.time()
+                    result_schedule = schedule.clone()
+                    rule_func(result_schedule.jobs, result_schedule)
+                    comp_time = time.time() - start_time
+                    
+                    results.append({
+                        'solver_name': name,
+                        'schedule': result_schedule,
+                        'computation_time': comp_time * 1000,
+                        'type': 'dispatching'
+                    })
+                    
+                    current += 1
+                    progress_bar.progress(current / total_solvers)
+                
+
+                
+                # Simulated Annealing
+                if use_sa:
+                    status_text.text("Running Simulated Annealing...")
+                    sa = SimulatedAnnealing(jobs, schedule, gamma, {
+                        'initial_temp': sa_temp,
+                        'cooling_rate': sa_cool,
+                        'iterations_per_temp': sa_iter,
+                        'min_temp': sa_min,
+                        'neighborhood_type': neighborhood_type,
+                        'max_no_improve': max_no_improve
+                    })
+                    start_time = time.time()
+                    sa_result = sa.solve()
+                    comp_time = time.time() - start_time
+                    
+                    results.append({
+                        'solver_name': 'Simulated Annealing',
+                        'schedule': sa_result['schedule'],
+                        'computation_time': comp_time * 1000,
+                        'type': 'metaheuristic',
+                        'convergence': sa_result['convergence']
+                    })
+                    convergence_data['SA'] = sa_result['convergence']
+                    
+                    current += 1
+                    progress_bar.progress(current / total_solvers)
+                
+                # Tabu Search
+                if use_ts:
+                    status_text.text("Running Tabu Search...")
+                    ts = TabuSearch(jobs, schedule, gamma, {
+                        'tabu_list_size': ts_tabu,
+                        'max_iterations': ts_iter,
+                        'neighborhood_type': neighborhood_type,
+                        'search_strategy': search_strategy,
+                        'max_no_improve': max_no_improve
+                    })
+                    start_time = time.time()
+                    ts_result = ts.solve()
+                    comp_time = time.time() - start_time
+                    
+                    results.append({
+                        'solver_name': 'Tabu Search',
+                        'schedule': ts_result['schedule'],
+                        'computation_time': comp_time * 1000,
+                        'type': 'metaheuristic',
+                        'convergence': ts_result['convergence']
+                    })
+                    convergence_data['TS'] = ts_result['convergence']
+                    
+                    current += 1
+                    progress_bar.progress(current / total_solvers)
+                
+                progress_bar.progress(1.0)
+                status_text.text("✅ Complete!")
+                time.sleep(0.5)
+                progress_bar.empty()
+                status_text.empty()
+                
+                # Display Results
+                st.success("✅ Optimization Complete!")
+                st.header("📊 Results")
+                
+                # Metrics cards
+                cols = st.columns(min(len(results), 4))
+                
+                for idx, result in enumerate(results):
+                    with cols[idx % len(cols)]:
+                        obj_value = result['schedule'].get_objective_value(gamma)
+                        st.metric(
+                            label=result['solver_name'],
+                            value=f"{obj_value:.2f}",
+                            delta=f"{result['computation_time']:.0f}ms"
+                        )
+                        
+
+                
+
+                
+                # Detailed table
+                st.subheader("Detailed Metrics")
+                metrics_data = []
+                for result in results:
+                    sch = result['schedule']
+                    metrics_data.append({
+                        'Solver': result['solver_name'],
+                        'Makespan': f"{sch.makespan:.2f}",
+                        'Total Completion': f"{sch.total_completion_time:.2f}",
+                        'Max Lateness': f"{sch.max_lateness:.2f}" if sch.max_lateness != float('-inf') else 'N/A',
+                        'Total Tardiness': f"{sch.total_tardiness:.2f}",
+                        'Weighted Tardiness': f"{sch.total_weighted_tardiness:.2f}",
+                        'Computation (ms)': f"{result['computation_time']:.0f}"
+                    })
+                
+                st.dataframe(pd.DataFrame(metrics_data), use_container_width=True)
+                
+                # Gantt Chart
+                st.subheader("Schedule Visualization")
+                best_result = min(results, key=lambda r: r['schedule'].get_objective_value(gamma))
+                fig = create_gantt_chart(best_result['schedule'], f"Best Schedule - {best_result['solver_name']}")
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Convergence chart
+                if convergence_data:
+                    st.subheader("Algorithm Convergence")
+                    conv_fig = create_convergence_chart(convergence_data)
+                    st.plotly_chart(conv_fig, use_container_width=True)
+
+else:
+    st.info("👈 Please select problem type (α) and objective (γ) from the sidebar to begin")
+    
+    st.markdown("""
+    ### How to Use
+    
+    1. **Define Problem**: Select machine environment (α), constraints (β), and objective (γ)
+    2. **Configure Jobs**: Set number of jobs and machines, then generate the job table
+    3. **Edit Values**: Modify processing times, release dates, due dates, and weights as needed
+    4. **Select Solvers**: Choose one or more dispatching rules or metaheuristic algorithms
+    5. **Tune Parameters**: Adjust algorithm parameters if using metaheuristics
+    6. **Solve**: Click the solve button and view results!
+    
+    ### Features
+    
+    - ✅ **Multiple Constraints**: Select one or more constraints (prec, ri, di)
+    - ✅ **Dynamic Inputs**: Release and due date columns appear based on selection
+    - ✅ **8 Dispatching Rules**: SPT, LPT, EDD, WSPT, FIFO, ERD, Wrap-Around, Johnson's
+    - ✅ **2 Metaheuristics**: Simulated Annealing, Tabu Search
+    - ✅ **3 Neighborhood Types**: Swap, Insert, Adjacent
+    - ✅ **LP Lower Bounds**: Compare solutions to theoretical optimum
+    - ✅ **Interactive Visualization**: Gantt charts and convergence plots
+    """)
+
+# Footer
+st.divider()
+st.caption("Scheduling Decision Support System | Production Planning Framework")
