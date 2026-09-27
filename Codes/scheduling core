@@ -1,0 +1,356 @@
+"""
+Core scheduling data structures and utilities
+"""
+from dataclasses import dataclass, field
+from typing import List, Optional, Union
+import numpy as np
+
+
+@dataclass
+class Job:
+    """Represents a job with processing times and constraints"""
+    id: int
+    processing_times: Union[float, List[float]]  # Single value or list for multi-machine
+    due_date: Optional[float] = None
+    weight: float = 1.0
+    release_date: float = 0.0
+    completion_time: float = 0.0
+    start_time: float = 0.0
+    predecessors: List[int] = field(default_factory=list)  # List of predecessor job IDs
+    routing: List[int] = field(default_factory=list)  # Machine visit order for job shop (e.g., [2, 0, 1] = M3→M1→M2)
+    
+    def get_total_processing_time(self) -> float:
+        """Get sum of all processing times"""
+        if isinstance(self.processing_times, list):
+            return sum(self.processing_times)
+        return self.processing_times
+    
+    def get_processing_time(self, machine_id: int = 0) -> float:
+        """Get processing time for specific machine.
+        Returns float('inf') if machine_id is out of range (job not eligible)."""
+        if isinstance(self.processing_times, list):
+            if machine_id < len(self.processing_times):
+                return self.processing_times[machine_id]
+            else:
+                return float('inf')  # Job not eligible on this machine
+        return self.processing_times
+    
+    def get_routing_processing_time(self, operation_index: int) -> float:
+        """Get processing time for operation at given index in routing"""
+        if not self.routing or operation_index >= len(self.routing):
+            return self.get_processing_time(operation_index)
+        machine_id = self.routing[operation_index]
+        return self.get_processing_time(machine_id)
+
+
+    def clone(self):
+        """Create a deep copy of the job"""
+        new_job = Job(
+            self.id,
+            self.processing_times.copy() if isinstance(self.processing_times, list) else self.processing_times,
+            self.due_date,
+            self.weight,
+            self.release_date
+        )
+        new_job.predecessors = self.predecessors.copy()
+        new_job.routing = self.routing.copy()
+        return new_job
+
+
+@dataclass
+class Task:
+    """Represents a scheduled task on a machine"""
+    job: Job
+    start_time: float
+    end_time: float
+
+
+class Machine:
+    """Represents a machine with its schedule"""
+    
+    def __init__(self, id: int):
+        self.id = id
+        self.schedule: List[Task] = []
+        self.available_time = 0.0
+    
+    def add_job(self, job: Job, start_time: float) -> float:
+        """Add job to machine schedule and return completion time"""
+        processing_time = job.get_processing_time(self.id)
+        end_time = start_time + processing_time
+        
+        self.schedule.append(Task(job, start_time, end_time))
+        self.available_time = end_time
+        return end_time
+    
+    def reset(self):
+        """Reset machine schedule"""
+        self.schedule = []
+        self.available_time = 0.0
+
+
+class Schedule:
+    """Represents a complete schedule with metrics"""
+    
+    def __init__(self, jobs: List[Job], problem_type: str, num_machines: int = 1):
+        self.jobs = jobs
+        self.problem_type = problem_type
+        self.num_machines = num_machines
+        self.machines = [Machine(i) for i in range(num_machines)]
+        self.job_sequence = []
+        
+        # Metrics
+        self.makespan = 0.0
+        self.total_completion_time = 0.0
+        self.total_weighted_completion_time = 0.0
+        self.max_lateness = float('-inf')
+        self.total_tardiness = 0.0
+        self.total_weighted_tardiness = 0.0
+    
+    def set_job_sequence(self, sequence: List[int]):
+        """Set the job processing sequence"""
+        self.job_sequence = sequence
+    
+    def calculate_metrics(self):
+        """Calculate all scheduling metrics"""
+        self.makespan = max(machine.available_time for machine in self.machines)
+        
+        self.total_completion_time = sum(job.completion_time for job in self.jobs)
+        self.total_weighted_completion_time = sum(
+            job.weight * job.completion_time for job in self.jobs
+        )
+        
+        # Calculate lateness and tardiness
+        self.max_lateness = float('-inf')
+        self.total_tardiness = 0.0
+        self.total_weighted_tardiness = 0.0
+        
+        for job in self.jobs:
+            if job.due_date is not None:
+                lateness = job.completion_time - job.due_date
+                tardiness = max(0, lateness)
+                self.max_lateness = max(self.max_lateness, lateness)
+                self.total_tardiness += tardiness
+                self.total_weighted_tardiness += job.weight * tardiness
+        
+        return {
+            'makespan': self.makespan,
+            'total_completion_time': self.total_completion_time,
+            'total_weighted_completion_time': self.total_weighted_completion_time,
+            'max_lateness': self.max_lateness if self.max_lateness != float('-inf') else None,
+            'total_tardiness': self.total_tardiness,
+            'total_weighted_tardiness': self.total_weighted_tardiness
+        }
+    
+    def get_objective_value(self, objective: str) -> float:
+        """Get value for specific objective function"""
+        if objective == 'Cmax':
+            return self.makespan
+        elif objective == 'sumCi':
+            return self.total_completion_time
+        elif objective == 'sumwiCi':
+            return self.total_weighted_completion_time
+        elif objective == 'Lmax':
+            return 0.0 if self.max_lateness == float('-inf') else self.max_lateness
+        elif objective == 'sumTi':
+            return self.total_tardiness
+        elif objective == 'sumwiTi':
+            return self.total_weighted_tardiness
+        return self.makespan
+    
+    def reset(self):
+        """Reset all machines and job completion times"""
+        for machine in self.machines:
+            machine.reset()
+        for job in self.jobs:
+            job.completion_time = 0.0
+            job.start_time = 0.0
+    
+    def clone(self):
+        """Create a copy of this schedule"""
+        # Deep copy jobs to ensure isolation
+        new_jobs = [job.clone() for job in self.jobs]
+        new_schedule = Schedule(new_jobs, self.problem_type, self.num_machines)
+        new_schedule.job_sequence = self.job_sequence.copy()
+        return new_schedule
+
+
+class SchedulingUtils:
+    """Utility functions for scheduling algorithms"""
+    
+    @staticmethod
+    def random_permutation(n: int) -> List[int]:
+        """Generate random permutation of integers 0 to n-1"""
+        return np.random.permutation(n).tolist()
+    
+    @staticmethod
+    def topological_sort(jobs: List[Job]) -> List[int]:
+        """Topological sort of jobs based on precedence constraints.
+        Returns a valid ordering of JOB IDs where predecessors come before successors."""
+        n = len(jobs)
+        job_map = {job.id: job for job in jobs}
+        
+        # Build in-degree count and adjacency list
+        in_degree = {job.id: len(job.predecessors) for job in jobs}
+        successors = {job.id: [] for job in jobs}
+        
+        for job in jobs:
+            for pred_id in job.predecessors:
+                if pred_id in successors:
+                    successors[pred_id].append(job.id)
+        
+        # Kahn's algorithm
+        queue = [job.id for job in jobs if in_degree[job.id] == 0]
+        result = []
+        
+        while queue:
+            # Sort by some priority (e.g., processing time for SPT-like ordering)
+            queue.sort(key=lambda jid: job_map[jid].get_total_processing_time())
+            current = queue.pop(0)
+            result.append(current)
+            
+            for succ in successors[current]:
+                in_degree[succ] -= 1
+                if in_degree[succ] == 0:
+                    queue.append(succ)
+        
+        if len(result) != n:
+            # Cycle detected, return original order
+            raise ValueError(f'Cycle in precedence! {len(result)}/{n} jobs ordered.')
+        
+        return result
+    
+    @staticmethod
+    def topological_sort_indices(jobs: List[Job]) -> List[int]:
+        """Topological sort that returns LIST INDICES (0..n-1) instead of job IDs.
+        Use this for metaheuristics where solutions are index-based."""
+        # Build mapping from job.id to list index
+        id_to_idx = {job.id: idx for idx, job in enumerate(jobs)}
+        
+        # Get topological order as job IDs
+        topo_ids = SchedulingUtils.topological_sort(jobs)
+        
+        # Convert to indices
+        return [id_to_idx[jid] for jid in topo_ids]
+    
+    @staticmethod
+    def is_valid_precedence_order(sequence: List[int], jobs: List[Job]) -> bool:
+        """Check if a sequence of INDICES respects all precedence constraints."""
+        # Build mapping from job.id to position in sequence
+        id_to_idx = {job.id: idx for idx, job in enumerate(jobs)}
+        position = {jobs[idx].id: pos for pos, idx in enumerate(sequence)}
+        
+        for idx in sequence:
+            job = jobs[idx]
+            for pred_id in job.predecessors:
+                if pred_id in position and position[pred_id] >= position[job.id]:
+                    return False  # Predecessor comes after this job
+        return True
+    
+    @staticmethod
+    def repair_precedence(sequence: List[int], jobs: List[Job]) -> List[int]:
+        """Repair a sequence of INDICES to respect precedence constraints."""
+        if SchedulingUtils.is_valid_precedence_order(sequence, jobs):
+            return sequence
+        
+        # Use topological sort as fallback - returns indices
+        return SchedulingUtils.topological_sort_indices(jobs)
+    
+    @staticmethod
+    def swap_mutation(individual: List[int]) -> List[int]:
+        """Swap two random positions in permutation"""
+        mutated = individual.copy()
+        n = len(mutated)
+        i, j = np.random.choice(n, 2, replace=False)
+        mutated[i], mutated[j] = mutated[j], mutated[i]
+        return mutated
+    
+    @staticmethod
+    def insert_move(individual: List[int]) -> List[int]:
+        """Remove a job and insert it at a different position"""
+        result = individual.copy()
+        n = len(result)
+        if n < 2:
+            return result
+        # Pick random position to remove
+        remove_pos = np.random.randint(0, n)
+        job = result.pop(remove_pos)
+        # Pick random position to insert (different from original)
+        insert_pos = np.random.randint(0, n)  # n-1 positions available after removal
+        result.insert(insert_pos, job)
+        return result
+    
+    @staticmethod
+    def swap_adjacent(individual: List[int]) -> List[int]:
+        """Swap two adjacent positions in permutation"""
+        result = individual.copy()
+        n = len(result)
+        if n < 2:
+            return result
+        i = np.random.randint(0, n - 1)
+        result[i], result[i + 1] = result[i + 1], result[i]
+        return result
+    
+class ScheduleValidator:
+    """Validates that a schedule satisfies all constraints"""
+    
+    @staticmethod
+    def validate(schedule: 'Schedule') -> dict:
+        """
+        Validate a schedule for correctness.
+        Returns dict with 'valid' bool and 'errors' list.
+        """
+        errors = []
+        
+        # 1. Check no overlaps per machine
+        for machine in schedule.machines:
+            sorted_tasks = sorted(machine.schedule, key=lambda t: t.start_time)
+            for i in range(len(sorted_tasks) - 1):
+                current = sorted_tasks[i]
+                next_task = sorted_tasks[i + 1]
+                if current.end_time > next_task.start_time + 0.001:  # Tolerance for float
+                    errors.append(f"Overlap on M{machine.id}: Job {current.job.id} ends at {current.end_time:.2f} but Job {next_task.job.id} starts at {next_task.start_time:.2f}")
+        
+        # 2. Check release dates
+        for job in schedule.jobs:
+            if job.start_time < job.release_date - 0.001:
+                errors.append(f"Job {job.id} starts at {job.start_time:.2f} before release {job.release_date:.2f}")
+        
+        # 3. Check precedence constraints
+        job_map = {job.id: job for job in schedule.jobs}
+        for job in schedule.jobs:
+            for pred_id in job.predecessors:
+                if pred_id in job_map:
+                    pred = job_map[pred_id]
+                    if job.start_time < pred.completion_time - 0.001:
+                        errors.append(f"Precedence violated: Job {job.id} starts at {job.start_time:.2f} before predecessor {pred_id} completes at {pred.completion_time:.2f}")
+        
+        # 4. Check flow order (for flow shop): start on Mk >= end on Mk-1
+        if schedule.problem_type == 'F':
+            for job in schedule.jobs:
+                for m in range(schedule.num_machines):
+                    machine = schedule.machines[m]
+                    # Find this job's task on this machine
+                    task_on_m = next((t for t in machine.schedule if t.job.id == job.id), None)
+                    if task_on_m and m > 0:
+                        prev_machine = schedule.machines[m - 1]
+                        task_on_prev = next((t for t in prev_machine.schedule if t.job.id == job.id), None)
+                        if task_on_prev and task_on_m.start_time < task_on_prev.end_time - 0.001:
+                            errors.append(f"Flow order violated: Job {job.id} starts on M{m} at {task_on_m.start_time:.2f} before ending on M{m-1} at {task_on_prev.end_time:.2f}")
+        
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors
+        }
+    
+    @staticmethod
+    def validate_and_print(schedule: 'Schedule') -> bool:
+        """Validate and print results. Returns True if valid."""
+        result = ScheduleValidator.validate(schedule)
+        if result['valid']:
+            print("✅ Schedule is valid!")
+        else:
+            print("❌ Schedule has errors:")
+            for err in result['errors']:
+                print(f"  - {err}")
+        return result['valid']
+
