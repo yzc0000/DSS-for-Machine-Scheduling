@@ -18,7 +18,7 @@ The interface supports release dates, precedence, preemption-related options, an
 
 ### Solvers
 
-- Dispatching rules: SPT, LPT, EDD, WSPT, and FIFO
+- Dispatching rules: SPT, LPT, EDD, ERD, WSPT, FIFO, Wrap-Around, and Johnson's rule for two-machine flow shops
 - Genetic Algorithm
 - Simulated Annealing
 - Tabu Search
@@ -65,7 +65,7 @@ produced **7/7 passing tests**:
 | Two-machine parallel shop, `Cmax` | LP bound = LPT = 9 |
 | Tabu Search convergence | Found the exhaustive optimum, `sumCi = 34` |
 
-The separate job-shop check in `test_job_shop.py` produced makespans of 98.0 for forward order, 100.0 for reverse order, and five distinct makespans across ten random orders. These checks validate schedule construction, objective calculations, lower bounds, and the Tabu Search implementation on small instances.
+The separate job-shop check in `test_job_shop.py` produced makespans of 110.0 for forward order, 84.0 for reverse order, and eight distinct makespans across ten random orders in the documented run. This check is intentionally stochastic because the random-order portion is not seeded. These checks validate schedule construction, objective calculations, lower bounds, and the Tabu Search implementation on small instances.
 
 ## Project structure
 
@@ -75,8 +75,8 @@ requirements.txt               Python dependencies
 verify_solvers.py              Deterministic correctness and solver checks
 test_job_shop.py               Job-shop schedule variance check
 modules/
-  scheduling_core.py           Jobs, machines, schedules, and metrics
-  dispatching_rules.py         SPT, LPT, EDD, WSPT, FIFO, and builders
+  scheduling_core.py           Jobs, machines, schedules, metrics, and validators
+  dispatching_rules.py         Dispatching rules and schedule builders
   genetic_algorithm.py         DEAP-based genetic algorithm
   simulated_annealing.py       Simulated Annealing solver
   tabu_search.py               Tabu Search solver

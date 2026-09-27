@@ -42,6 +42,39 @@ class DispatchingRules:
         schedule.reset()
         sorted_jobs = sorted(jobs, key=lambda j: (j.release_date, j.id))
         return DispatchingRules._build_schedule(sorted_jobs, schedule)
+
+    @staticmethod
+    def ERD(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Earliest Release Date."""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: (j.release_date, j.id))
+        return DispatchingRules._build_schedule(sorted_jobs, schedule)
+
+    @staticmethod
+    def WrapAround(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Round-robin assignment for parallel machines."""
+        schedule.reset()
+        sorted_jobs = sorted(jobs, key=lambda j: j.id)
+        return DispatchingRules._build_wrap_around(sorted_jobs, schedule)
+
+    @staticmethod
+    def Johnson(jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Johnson's optimal sequencing rule for a two-machine flow shop."""
+        schedule.reset()
+        if schedule.num_machines != 2 or schedule.problem_type != 'F':
+            sorted_jobs = sorted(jobs, key=lambda j: j.get_total_processing_time())
+            return DispatchingRules._build_schedule(sorted_jobs, schedule)
+
+        first = []
+        second = []
+        for job in jobs:
+            if job.get_processing_time(0) < job.get_processing_time(1):
+                first.append(job)
+            else:
+                second.append(job)
+        first.sort(key=lambda j: j.get_processing_time(0))
+        second.sort(key=lambda j: j.get_processing_time(1), reverse=True)
+        return DispatchingRules._build_flow_shop(first + second, schedule)
     
     @staticmethod
     def _build_schedule(sorted_jobs: List[Job], schedule: Schedule) -> Schedule:
@@ -172,6 +205,24 @@ class DispatchingRules:
             end_time = earliest_machine.add_job(job, start_time)
             job.completion_time = end_time
         
+        schedule.calculate_metrics()
+        return schedule
+
+    @staticmethod
+    def _build_wrap_around(sorted_jobs: List[Job], schedule: Schedule) -> Schedule:
+        """Assign jobs to parallel machines in round-robin order."""
+        num_machines = schedule.num_machines
+        job_map = {job.id: job for job in sorted_jobs}
+
+        for index, job in enumerate(sorted_jobs):
+            machine = schedule.machines[index % num_machines]
+            start_time = max(machine.available_time, job.release_date)
+            for predecessor_id in job.predecessors:
+                if predecessor_id in job_map:
+                    start_time = max(start_time, job_map[predecessor_id].completion_time)
+            job.start_time = start_time
+            job.completion_time = machine.add_job(job, start_time)
+
         schedule.calculate_metrics()
         return schedule
     

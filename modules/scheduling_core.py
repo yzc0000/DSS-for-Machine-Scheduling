@@ -231,7 +231,36 @@ class SchedulingUtils:
         # Use topological sort as fallback
         job_list = [job for job in jobs if job.id in sequence]
         return SchedulingUtils.topological_sort(job_list)
-    
+
+    @staticmethod
+    def topological_sort_indices(jobs: List[Job]) -> List[int]:
+        """Return a precedence-feasible ordering as list indices."""
+        id_to_index = {job.id: index for index, job in enumerate(jobs)}
+        return [id_to_index[job_id] for job_id in SchedulingUtils.topological_sort(jobs)]
+
+    @staticmethod
+    def insert_move(individual: List[int]) -> List[int]:
+        """Remove one item and insert it at another position."""
+        result = individual.copy()
+        if len(result) < 2:
+            return result
+        remove_position = np.random.randint(0, len(result))
+        item = result.pop(remove_position)
+        insert_position = np.random.randint(0, len(result) + 1)
+        result.insert(insert_position, item)
+        return result
+
+    @staticmethod
+    def swap_adjacent(individual: List[int]) -> List[int]:
+        """Swap one randomly selected adjacent pair."""
+        result = individual.copy()
+        if len(result) < 2:
+            return result
+        position = np.random.randint(0, len(result) - 1)
+        result[position], result[position + 1] = result[position + 1], result[position]
+        return result
+
+
     @staticmethod
     def order_crossover(parent1: List[int], parent2: List[int]) -> List[int]:
         """Order crossover for permutation representation"""
@@ -276,3 +305,61 @@ class SchedulingUtils:
         competitors = np.random.choice(n, tournament_size, replace=False)
         best = min(competitors, key=lambda i: fitness_scores[i])
         return population[best]
+
+
+class ScheduleValidator:
+    """Validate machine capacity, release, precedence, and flow constraints."""
+
+    @staticmethod
+    def validate(schedule: 'Schedule') -> dict:
+        errors = []
+
+        for machine in schedule.machines:
+            tasks = sorted(machine.schedule, key=lambda task: task.start_time)
+            for current, following in zip(tasks, tasks[1:]):
+                if current.end_time > following.start_time + 0.001:
+                    errors.append(
+                        f"Overlap on M{machine.id}: Job {current.job.id} ends at "
+                        f"{current.end_time:.2f} but Job {following.job.id} starts at "
+                        f"{following.start_time:.2f}"
+                    )
+
+        for job in schedule.jobs:
+            if job.start_time < job.release_date - 0.001:
+                errors.append(
+                    f"Job {job.id} starts at {job.start_time:.2f} before release "
+                    f"{job.release_date:.2f}"
+                )
+
+        jobs_by_id = {job.id: job for job in schedule.jobs}
+        for job in schedule.jobs:
+            for predecessor_id in job.predecessors:
+                predecessor = jobs_by_id.get(predecessor_id)
+                if predecessor and job.start_time < predecessor.completion_time - 0.001:
+                    errors.append(
+                        f"Precedence violated: Job {job.id} starts before "
+                        f"predecessor {predecessor_id} completes"
+                    )
+
+        if schedule.problem_type == 'F':
+            for job in schedule.jobs:
+                previous_end = None
+                for machine in schedule.machines:
+                    task = next((task for task in machine.schedule if task.job.id == job.id), None)
+                    if task is not None and previous_end is not None and task.start_time < previous_end - 0.001:
+                        errors.append(f"Flow order violated for Job {job.id} on M{machine.id}")
+                    if task is not None:
+                        previous_end = task.end_time
+
+        return {'valid': not errors, 'errors': errors}
+
+    @staticmethod
+    def validate_and_print(schedule: 'Schedule') -> bool:
+        result = ScheduleValidator.validate(schedule)
+        if result['valid']:
+            print('Schedule is valid!')
+        else:
+            print('Schedule has errors:')
+            for error in result['errors']:
+                print(f'  - {error}')
+        return result['valid']

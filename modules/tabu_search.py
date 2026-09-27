@@ -110,6 +110,14 @@ class TabuSearch:
                 neighbors.append((neighbor, (i, j)))
         
         return neighbors
+
+    def _generate_neighbors(self, solution: List[int]) -> List[Tuple[List[int], Tuple[int, int]]]:
+        """Compatibility entry point for the repository's original Tabu Search API.
+
+        The organized implementation uses the complete swap neighborhood by
+        default, which is equivalent to the original solver's default mode.
+        """
+        return self._generate_all_neighbors(solution)
     
     def _is_tabu_move(self, move: Tuple[int, int]) -> bool:
         """Check if move is in tabu list"""
